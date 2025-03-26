@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 eframe = { version = "0.31.1" }
 egui_plot = "0.31.0"
+splines = "4.4.2"

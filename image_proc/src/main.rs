@@ -2,6 +2,7 @@ use std::f64::consts::PI;
 
 use eframe::CreationContext;
 use egui_plot::{Line, Plot, PlotPoints};
+use splines::interpolate::Interpolate;
 
 mod widget1;
 
@@ -12,7 +13,7 @@ struct MainData {
 impl MainData {
     fn new(_cc:&CreationContext) -> Self {
         Self {
-            scale: vec![1.0, 1.0, 1.0],
+            scale: vec![0.0; 16],
         }
     }
 }
@@ -44,17 +45,24 @@ impl eframe::App for MainData {
         eframe::egui::CentralPanel::default().show(ctx, |ui| {
             ui.label("I am groot");
             let less_points = &self.scale;
-            let mut points_out = [0.0; 34];
+            let spoints = self.scale.iter().enumerate().map(|(i, y)| {
+                splines::Key::new(i as f64, y.to_owned(), splines::Interpolation::Cosine)
+            }).collect();
+            let spline = splines::Spline::from_vec(spoints);
+            let mut points_out = [0.0; 340];
             let time_scale = (less_points.len() - 1) as f64 / (points_out.len() - 1) as f64;
+            for (i, e) in points_out.iter_mut().enumerate() {
+                let t = time_scale * i as f64;
+                let a : f64 = spline.clamped_sample(t).unwrap();
+                *e = a;
+            }
+            let a: PlotPoints = points_out.iter_mut().enumerate().map(|(i, v)| {[time_scale * i as f64, *v]}).collect();
             sinc_interpolate(&less_points, &mut points_out);
             let plot: PlotPoints = less_points.iter().enumerate().map(|a| {
                 [a.0 as f64, *a.1]
             }).collect();
             let line = Line::new(plot);
-            let plot2: PlotPoints = points_out.iter().enumerate().map(|a| {
-                [time_scale * a.0 as f64, *a.1]
-            }).collect();
-            let line2 = Line::new(plot2);
+            let line2 = Line::new(a);
             let p = Plot::new("my_plot").view_aspect(2.0).allow_drag(false).show(ui, |plot_ui| {
                 plot_ui.line(line);
                 plot_ui.line(line2);
@@ -70,10 +78,8 @@ impl eframe::App for MainData {
                     let a = p.transform.value_from_position(ptr);
                     let b = a.x.round();
                     if b >= 0.0 && b < self.scale.len() as f64 {
-                        println!("Drag plot point is at {:?} {:?}", a, b);
                         let newpos = ptr + p.response.drag_delta();
                         let newpos2 = p.transform.value_from_position(newpos);
-                        println!("New pos is {:?}", newpos2);
                         self.scale[b as usize] = newpos2.y as f64;
                     }
                 }
