@@ -5,12 +5,14 @@ use egui_plot::{Line, Plot, PlotPoints};
 
 mod widget1;
 
-struct MainData {}
+struct MainData {
+    scale: Vec<f64>,
+}
 
 impl MainData {
     fn new(_cc:&CreationContext) -> Self {
         Self {
-
+            scale: vec![1.0, 1.0, 1.0],
         }
     }
 }
@@ -31,7 +33,7 @@ fn sinc_interpolate(indata: &[f64], odata: &mut [f64]) {
         let i_index = o_frac * (indata.len() - 1) as f64;
         let mut total : f64 = 0.0;
         for (index, in_element) in indata.iter().enumerate() {
-            total += *in_element * sinc(i_index - index as f64);
+            total += *in_element * sinc(index as f64 - i_index);
         }
         *elem = total;
     }
@@ -41,7 +43,7 @@ impl eframe::App for MainData {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         eframe::egui::CentralPanel::default().show(ctx, |ui| {
             ui.label("I am groot");
-            let less_points = [1.0,1.0,2.0,1.0,1.0];
+            let less_points = &self.scale;
             let mut points_out = [0.0; 34];
             let time_scale = (less_points.len() - 1) as f64 / (points_out.len() - 1) as f64;
             sinc_interpolate(&less_points, &mut points_out);
@@ -53,10 +55,29 @@ impl eframe::App for MainData {
                 [time_scale * a.0 as f64, *a.1]
             }).collect();
             let line2 = Line::new(plot2);
-            Plot::new("my_plot").view_aspect(2.0).show(ui, |plot_ui| {
+            let p = Plot::new("my_plot").view_aspect(2.0).allow_drag(false).show(ui, |plot_ui| {
                 plot_ui.line(line);
                 plot_ui.line(line2);
             });
+            if p.response.clicked() {
+                if let Some(ptr) = p.response.interact_pointer_pos() {
+                    let a = p.transform.value_from_position(ptr);
+                    println!("Plot point is at {:?}", a);
+                }
+            }
+            else if p.response.dragged() {
+                if let Some(ptr) = p.response.interact_pointer_pos() {
+                    let a = p.transform.value_from_position(ptr);
+                    let b = a.x.round();
+                    if b >= 0.0 && b < self.scale.len() as f64 {
+                        println!("Drag plot point is at {:?} {:?}", a, b);
+                        let newpos = ptr + p.response.drag_delta();
+                        let newpos2 = p.transform.value_from_position(newpos);
+                        println!("New pos is {:?}", newpos2);
+                        self.scale[b as usize] = newpos2.y as f64;
+                    }
+                }
+            }
         });
     }
 }
