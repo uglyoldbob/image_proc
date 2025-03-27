@@ -1,13 +1,19 @@
-use std::io::Read;
+use std::{f64::consts::E, io::Read};
 
-use eframe::CreationContext;
+use eframe::{egui::Color32, CreationContext};
 use egui_plot::{Line, Plot, PlotPoints};
 
 struct MainData {
     scale: Vec<f64>,
     actual_image: Option<eframe::egui::ColorImage>,
+    cimage: Option<eframe::egui::ColorImage>,
     img: Option<eframe::egui::TextureHandle>,
     corrected_img: Option<eframe::egui::TextureHandle>,
+}
+
+enum InterpolationMethod {
+    Nearest,
+    Linear,
 }
 
 impl MainData {
@@ -15,8 +21,53 @@ impl MainData {
         Self {
             scale: vec![0.0; 16],
             actual_image: None,
+            cimage: None,
             img: None,
             corrected_img: None,
+        }
+    }
+
+    fn correct_image(&mut self, ctx: &eframe::egui::Context, spline: splines::Spline<f64, f64>, method: InterpolationMethod) {
+        if let Some(i) = &self.actual_image {
+            let mut ic = i.clone();
+            let mut moved_pixels : Vec<(f64, f64, eframe::egui::Color32)> = Vec::new();
+            let center_x = ic.width() as f64 / 2.0;
+            let center_y = ic.height() as f64 / 2.0;
+            let corner_distance = ((center_x * center_x) + (center_y * center_y)).sqrt();
+            for x in 0..ic.width() {
+                for y in 0..ic.height() {
+                    let dx = (x as f64) - center_x;
+                    let dy = (y as f64) - center_y;
+                    let dist = ((dx*dx)+(dy*dy)).sqrt() / corner_distance;
+                    let correction = spline.clamped_sample(dist).unwrap();
+                    let correction = E.powf(correction);
+                    let newdx = dx * correction;
+                    let newdy = dy * correction;
+                    let newx = newdx + center_x;
+                    let newy = newdy + center_y;
+                    moved_pixels.push((newx, newy, ic.pixels[y * ic.width() + x]));
+                }
+            }
+            let width = ic.width();
+            for i in &mut ic.pixels {
+                *i = Color32::BLACK;
+            }
+            match method {
+                InterpolationMethod::Linear => todo!(),
+                InterpolationMethod::Nearest => {
+                    for (x, y, p) in moved_pixels {
+                        let nx = x.round();
+                        let ny = y.round();
+                        if nx >= 0.0 && ny >= 0.0 && nx < ic.width() as f64 && ny < ic.height() as f64 {
+                            let nx = nx as usize;
+                            let ny = ny as usize;
+                            ic.pixels[ny * width + nx] = p;
+                        }
+                    }
+                }
+            }
+            let a = ctx.load_texture("corrected_image", ic, eframe::egui::TextureOptions::LINEAR);
+            self.corrected_img.replace(a);
         }
     }
 }
@@ -46,14 +97,23 @@ impl eframe::App for MainData {
                         }
                     }
                 }
-
-                if let Some(th) = &self.img {
-                    let st = eframe::egui::load::SizedTexture {
-                        id: th.id(),
-                        size: th.size_vec2(),
-                    };
-                    ui.add(eframe::egui::Image::from_texture(st));
-                }
+                ui.horizontal(|ui| {
+                    if let Some(th) = &self.img {
+                        let st = eframe::egui::load::SizedTexture {
+                            id: th.id(),
+                            size: th.size_vec2() * 0.5,
+                        };
+                        ui.add(eframe::egui::Image::from_texture(st));
+                    }
+    
+                    if let Some(th) = &self.corrected_img {
+                        let st = eframe::egui::load::SizedTexture {
+                            id: th.id(),
+                            size: th.size_vec2() * 0.5,
+                        };
+                        ui.add(eframe::egui::Image::from_texture(st));
+                    }
+                });
     
                 let less_points = &self.scale;
                 let spoints = self
@@ -104,6 +164,7 @@ impl eframe::App for MainData {
                             let newpos = ptr + p.response.drag_delta();
                             let newpos2 = p.transform.value_from_position(newpos);
                             self.scale[b as usize] = newpos2.y as f64;
+                            self.correct_image(ctx, spline, InterpolationMethod::Nearest);
                         }
                     }
                 }
