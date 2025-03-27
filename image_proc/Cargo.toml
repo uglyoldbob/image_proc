@@ -8,5 +8,6 @@ eframe = { version = "0.31.1" }
 egui_extras = { version = "0.31.1", features = ["file", "image"] }
 egui_plot = "0.31.0"
 image = { version = "0.25.6", features = ["jpeg", "png"] }
+opencv = "0.94.3"
 rfd = "0.15.3"
 splines = "4.4.2"
