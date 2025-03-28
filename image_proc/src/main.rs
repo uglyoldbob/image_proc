@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, io::Read};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Read,
+    thread::JoinHandle,
+    time::Duration,
+};
 
 use eframe::{CreationContext, egui::Color32};
 use egui_plot::{Line, Plot, PlotPoints};
@@ -17,6 +22,8 @@ struct OpenCvCamera {
 
 enum ToCameraThread {
     ValidCamera(i32, OpenCvCamera),
+    OpenCamera(i32),
+    CloseCamera(i32),
     Quit,
 }
 
@@ -34,6 +41,16 @@ fn live_camera_thread(
             match a {
                 ToCameraThread::ValidCamera(i, c) => {
                     live_cameras.insert(i, c);
+                }
+                ToCameraThread::OpenCamera(i) => {
+                    if let Some(c) = live_cameras.get_mut(&i) {
+                        c.open();
+                    }
+                }
+                ToCameraThread::CloseCamera(i) => {
+                    if let Some(c) = live_cameras.get_mut(&i) {
+                        c.close();
+                    }
                 }
                 ToCameraThread::Quit => {
                     break;
@@ -121,9 +138,14 @@ struct MainData {
     actual_image: Option<eframe::egui::ColorImage>,
     img: Option<eframe::egui::TextureHandle>,
     corrected_img: Option<eframe::egui::TextureHandle>,
-    live_cameras: BTreeMap<i32, OpenCvCamera>,
+    live_cameras: BTreeSet<i32>,
     selected_camera: Option<i32>,
     charuco_images: Vec<opencv::core::Mat>,
+    charuco_board: opencv::core::Ptr<opencv::aruco::CharucoBoard>,
+    image_thread: JoinHandle<()>,
+    image_set: BTreeMap<i32, Box<opencv::core::Mat>>,
+    to_image_thread: crossbeam::channel::Sender<ToCameraThread>,
+    from_image_thread: crossbeam::channel::Receiver<FromCameraThread>,
 }
 
 enum InterpolationMethod {
@@ -133,14 +155,23 @@ enum InterpolationMethod {
 
 impl MainData {
     fn new(_cc: &CreationContext) -> Self {
+        let to_thread = crossbeam::channel::bounded(5);
+        let from_thread = crossbeam::channel::bounded(5);
+        let t = std::thread::spawn(|| live_camera_thread(to_thread.1, from_thread.0));
+        let cboard = make_charuco_board().unwrap();
         Self {
             scale: vec![0.0; 32],
             actual_image: None,
             img: None,
             corrected_img: None,
-            live_cameras: BTreeMap::new(),
+            live_cameras: BTreeSet::new(),
             selected_camera: None,
             charuco_images: Vec::new(),
+            charuco_board: cboard,
+            image_thread: t,
+            image_set: BTreeMap::new(),
+            to_image_thread: to_thread.0,
+            from_image_thread: from_thread.1,
         }
     }
 
@@ -210,7 +241,8 @@ impl MainData {
             if let Some(mut c) = OpenCvCamera::new(i) {
                 consecutive_fail = 0;
                 c.close();
-                self.live_cameras.insert(i, c);
+                let _ = self.to_image_thread.send(ToCameraThread::ValidCamera(i, c));
+                self.live_cameras.insert(i);
             } else {
                 consecutive_fail += 1;
             }
@@ -220,39 +252,106 @@ impl MainData {
         }
         println!("Found {} cameras", self.live_cameras.len());
     }
-}
 
-fn generate_charuco_image() {
-    let dict = opencv::aruco::DICT_4X4_100;
-    let d = opencv::aruco::Dictionary::get(dict);
-    println!("Getting dictionary");
-    if let Ok(d) = d {
-        println!("Making charuco board");
-        let board = opencv::aruco::CharucoBoard::create(10, 10, 10.0 * 0.0254, 7.0 * 0.0254, &d);
-        if let Ok(mut board) = board {
-            println!("Saving charuco board");
-            let mut pic = opencv::core::Mat::default();
-            let a = opencv::aruco::CharucoBoardTrait::draw(
-                &mut board,
-                opencv::core::Size {
-                    width: 2400,
-                    height: 2400,
-                },
-                &mut pic,
-                10,
-                1,
-            );
-            let b = opencv::imgcodecs::imwrite("./charuco.png", &pic, &opencv::core::Vector::new());
-            println!("Results {:?} {:?}", a, b);
-        } else {
-            println!("Failed to make charuco board {:?}", board);
+    fn save_charuco_image(&mut self) {
+        println!("Saving charuco board");
+        let mut pic = opencv::core::Mat::default();
+        let a = opencv::aruco::CharucoBoardTrait::draw(
+            &mut self.charuco_board,
+            opencv::core::Size {
+                width: 2400,
+                height: 2400,
+            },
+            &mut pic,
+            10,
+            1,
+        );
+        let b = opencv::imgcodecs::imwrite("./charuco.png", &pic, &opencv::core::Vector::new());
+        println!("Results {:?} {:?}", a, b);
+    }
+
+    fn check_charuco_image(&self, img: &opencv::core::Mat) {
+        if let Some(d) = get_charuco_dictionary() {
+            let mut corners: opencv::core::Vector<opencv::core::Vector<opencv::core::Point2f>> =
+                Default::default();
+            let mut a: opencv::core::Vector<opencv::core::Point2f> = Default::default();
+            a.push(Default::default());
+            a.push(Default::default());
+            a.push(Default::default());
+            a.push(Default::default());
+            let num_things = 6;
+            for _ in 0..num_things {
+                corners.push(a.clone());
+            }
+            let mut ids: opencv::core::Vector<i32> = Default::default();
+            for _ in 0..num_things {
+                ids.push(0);
+            }
+            let a = opencv::aruco::detect_markers_def(img, &d, &mut corners, &mut ids);
+            if a.is_ok() {
+                println!("Detect markers is ok");
+                let mut charuco_corners: opencv::core::Mat = Default::default();
+                let mut charuco_ids: opencv::core::Mat = Default::default();
+                let min_markers = 2;
+                let b = opencv::aruco::interpolate_corners_charuco(
+                    &corners,
+                    &ids,
+                    img,
+                    &self.charuco_board,
+                    &mut charuco_corners,
+                    &mut charuco_ids,
+                    &opencv::core::no_array(),
+                    &opencv::core::no_array(),
+                    min_markers,
+                );
+                if let Ok(b) = b {
+                    println!("Interpolate retured {}", b);
+                } else {
+                    println!("Interpolate failed {:?}", b);
+                }
+            } else {
+                println!("Detect markers failed {:?}", a);
+            }
         }
     }
 }
 
+fn get_charuco_dictionary() -> Option<opencv::core::Ptr<opencv::aruco::Dictionary>> {
+    let dict = opencv::aruco::DICT_4X4_100;
+    let d = opencv::aruco::Dictionary::get(dict);
+    d.ok()
+}
+
+fn make_charuco_board() -> Option<opencv::core::Ptr<opencv::aruco::CharucoBoard>> {
+    if let Some(d) = get_charuco_dictionary() {
+        println!("Making charuco board");
+        let board = opencv::aruco::CharucoBoard::create(10, 10, 10.0 * 0.0254, 7.0 * 0.0254, &d);
+        board.ok()
+    } else {
+        None
+    }
+}
+
 impl eframe::App for MainData {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let _ = self.to_image_thread.send(ToCameraThread::Quit);
+    }
+
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+        ctx.request_repaint_after(Duration::from_millis(10));
         let mut use_newest_image = false;
+        while let Ok(a) = self.from_image_thread.try_recv() {
+            match a {
+                FromCameraThread::CameraImage(i, bm) => {
+                    if let Some(j) = self.selected_camera {
+                        if j != i {
+                            let _ = self.to_image_thread.send(ToCameraThread::CloseCamera(i));
+                        }
+                    }
+                    self.image_set.insert(i, bm);
+                }
+            }
+        }
         eframe::egui::CentralPanel::default().show(ctx, |ui| {
             egui_extras::install_image_loaders(ctx);
 
@@ -261,19 +360,22 @@ impl eframe::App for MainData {
                     eframe::egui::ComboBox::from_label("Select a camera")
                         .selected_text(format!("{:?}", self.selected_camera))
                         .show_ui(ui, |ui| {
-                            for (i, c) in &self.live_cameras {
+                            for i in &self.live_cameras {
                                 ui.selectable_value(
                                     &mut self.selected_camera,
                                     Some(*i),
-                                    format!("{:?}", c),
+                                    format!("Camera {}", i),
                                 );
                             }
                         });
                     if ui.button("Open camera").clicked() {
-                        if let Some(i) = &self.selected_camera {
-                            if let Some(c) = self.live_cameras.get_mut(i) {
-                                c.open();
-                            }
+                        if let Some(i) = self.selected_camera {
+                            let _ = self.to_image_thread.send(ToCameraThread::OpenCamera(i));
+                        }
+                    }
+                    if ui.button("Close camera").clicked() {
+                        if let Some(i) = self.selected_camera {
+                            let _ = self.to_image_thread.send(ToCameraThread::CloseCamera(i));
                         }
                     }
                 });
@@ -302,7 +404,7 @@ impl eframe::App for MainData {
                         }
                     }
                     if ui.button("Generate charuco pattern").clicked() {
-                        generate_charuco_image();
+                        self.save_charuco_image();
                     }
                     if ui.button("Save charuco capture from camera").clicked() {
                         use_newest_image = true;
@@ -316,22 +418,21 @@ impl eframe::App for MainData {
                     self.charuco_images.len()
                 ));
                 if let Some(i) = &self.selected_camera {
-                    if let Some(c) = self.live_cameras.get_mut(i) {
-                        if let Some(img) = c.get_image() {
-                            if let Ok(data) = img.data_bytes() {
-                                if use_newest_image {
-                                    self.charuco_images.push(img.clone());
-                                }
-                                let dims = [img.cols() as usize, img.rows() as usize];
-                                let cimg = eframe::egui::ColorImage::from_rgb(dims, data);
-                                let a = ctx.load_texture(
-                                    "actual_image",
-                                    cimg.clone(),
-                                    eframe::egui::TextureOptions::LINEAR,
-                                );
-                                self.actual_image.replace(cimg);
-                                self.img.replace(a);
+                    if let Some(img) = self.image_set.get(i) {
+                        if let Ok(data) = img.data_bytes() {
+                            self.check_charuco_image(img.as_ref());
+                            if use_newest_image {
+                                self.charuco_images.push(*img.clone());
                             }
+                            let dims = [img.cols() as usize, img.rows() as usize];
+                            let cimg = eframe::egui::ColorImage::from_rgb(dims, data);
+                            let a = ctx.load_texture(
+                                "actual_image",
+                                cimg.clone(),
+                                eframe::egui::TextureOptions::LINEAR,
+                            );
+                            self.actual_image.replace(cimg);
+                            self.img.replace(a);
                         }
                     }
                 }
