@@ -295,6 +295,9 @@ impl MainData {
                     ids.push(0);
                 }
                 let a = opencv::aruco::detect_markers_def(&img, &d, &mut corners, &mut ids);
+                for r in &corners {
+                    println!("Accepted corner: {:?}", r);
+                }
                 println!("There are {} corners, {} ids", corners.len(), ids.len());
                 for id in &ids {
                     println!("ID: {}", id);
@@ -319,6 +322,9 @@ impl MainData {
                         charuco_corners.len(),
                         charuco_ids.len()
                     );
+                    for r in &charuco_corners {
+                        println!("Accepted ch_corner: {:?}", r);
+                    }
                     let criteria = opencv::core::TermCriteria {
                         typ: opencv::core::TermCriteria_Type::EPS as i32
                             + opencv::core::TermCriteria_Type::COUNT as i32,
