@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Read,
+    io::{Read, Write},
     thread::JoinHandle,
     time::Duration,
 };
@@ -11,6 +11,43 @@ use opencv::{
     core::{MatTraitConst, MatTraitConstManual},
     videoio::VideoCaptureTrait,
 };
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SaveableOpencvMat {
+    width: i32,
+    height: i32,
+    typ: i32,
+    data: Vec<u8>,
+}
+
+impl From<opencv::core::Mat> for SaveableOpencvMat {
+    fn from(value: opencv::core::Mat) -> Self {
+        let s = value.size().unwrap();
+        Self {
+            width: s.width,
+            height: s.height,
+            typ: value.typ(), 
+            data: value.data_bytes().unwrap().to_vec(),
+        }
+    }
+}
+
+impl Into<opencv::core::Mat> for SaveableOpencvMat {
+    fn into(self) -> opencv::core::Mat {
+        let mut size = opencv::core::Size::default();
+        size.width = self.width;
+        size.height = self.height;
+        let mut m = unsafe { opencv::core::Mat::new_size(size, self.typ) }.unwrap();
+        let orig = opencv::core::Mat::new_size_with_data(size, &self.data).unwrap();
+        let _ = orig.copy_to(&mut m);
+        m
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+enum CalibrationData {
+    OpenCvCharuco([SaveableOpencvMat; 2]),
+}
 
 #[derive(Debug)]
 struct OpenCvCamera {
@@ -146,6 +183,7 @@ struct MainData {
     image_set: BTreeMap<i32, Box<opencv::core::Mat>>,
     to_image_thread: crossbeam::channel::Sender<ToCameraThread>,
     from_image_thread: crossbeam::channel::Receiver<FromCameraThread>,
+    cd: Option<CalibrationData>,
 }
 
 enum InterpolationMethod {
@@ -172,6 +210,7 @@ impl MainData {
             image_set: BTreeMap::new(),
             to_image_thread: to_thread.0,
             from_image_thread: from_thread.1,
+            cd: None,
         }
     }
 
@@ -367,6 +406,15 @@ impl MainData {
             criteria,
         );
         println!("Calibrate returned {:?} {:?} {:?}", c, camera_matrix, dist_coeffs);
+        let cm: SaveableOpencvMat = camera_matrix.into();
+        let dc: SaveableOpencvMat = dist_coeffs.into();
+        let cd = CalibrationData::OpenCvCharuco([cm, dc]);
+        let data = bincode::serde::encode_to_vec(&cd, bincode::config::standard());
+        if let Ok(data) = data {
+            let mut f = std::fs::File::create("./test.bin").unwrap();
+            f.write_all(&data).unwrap();
+        }
+        self.cd = Some(cd);
         Ok(())
     }
 
