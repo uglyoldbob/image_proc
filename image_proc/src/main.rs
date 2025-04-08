@@ -270,14 +270,14 @@ impl MainData {
 
     fn save_charuco_image(&mut self) {
         println!("Saving charuco board");
-        let pic = self.make_charuco_mat();
+        let pic = self. make_charuco_mat();
         let _ = opencv::imgcodecs::imwrite("./charuco.png", &pic, &opencv::core::Vector::new());
     }
 
     fn calibrate_camera(&mut self, i: i32) {
         if let Some(d) = get_charuco_dictionary() {
-            let mut camera_matrix: opencv::core::Vector<f64> = Default::default();
-            let mut dist_coeffs: opencv::core::Vector<f64> = Default::default();
+            let mut camera_matrix: opencv::core::Mat = Default::default();
+            let mut dist_coeffs: opencv::core::Mat = Default::default();
             for img in &self.charuco_images {
                 let mut corners: opencv::core::Vector<opencv::core::Vector<opencv::core::Point2f>> =
                     Default::default();
@@ -286,7 +286,7 @@ impl MainData {
                 a.push(Default::default());
                 a.push(Default::default());
                 a.push(Default::default());
-                let num_things = 6;
+                let num_things = 81;
                 for _ in 0..num_things {
                     corners.push(a.clone());
                 }
@@ -304,27 +304,21 @@ impl MainData {
                 }
                 if a.is_ok() {
                     println!("Detect markers is ok");
-                    let mut charuco_corners: opencv::core::Vector<
-                        opencv::core::Vector<opencv::core::Point2f>,
-                    > = Default::default();
-                    let mut charuco_ids: opencv::core::Vector<i32> = Default::default();
-                    let min_markers = 2;
+                    let mut charuco_corners: opencv::core::Mat = Default::default();
+                    let mut charuco_ids: opencv::core::Mat = Default::default();
                     let b = opencv::aruco::interpolate_corners_charuco_def(
                         &corners,
                         &ids,
-                        &img,
+                        img,
                         &self.charuco_board,
                         &mut charuco_corners,
                         &mut charuco_ids,
                     );
                     println!(
                         "charuco: There are {} corners, {} ids",
-                        charuco_corners.len(),
-                        charuco_ids.len()
+                        charuco_corners.rows(),
+                        charuco_ids.rows()
                     );
-                    for r in &charuco_corners {
-                        println!("Accepted ch_corner: {:?}", r);
-                    }
                     let criteria = opencv::core::TermCriteria {
                         typ: opencv::core::TermCriteria_Type::EPS as i32
                             + opencv::core::TermCriteria_Type::COUNT as i32,
@@ -332,15 +326,17 @@ impl MainData {
                         epsilon: 0.1,
                     };
                     if let Ok(b) = b {
+                        let size = opencv::core::Size {
+                            width: self.charuco_images[0].cols(),
+                            height: self.charuco_images[0].rows(),
+                        };
                         println!("Interpolate retured {}", b);
+                        println!("Size is {:?}", size);
                         let c = opencv::aruco::calibrate_camera_charuco(
                             &charuco_corners,
                             &charuco_ids,
                             &self.charuco_board,
-                            opencv::core::Size {
-                                width: self.charuco_images[0].cols(),
-                                height: self.charuco_images[0].rows(),
-                            },
+                            size,
                             &mut camera_matrix,
                             &mut dist_coeffs,
                             &mut opencv::core::no_array(),
@@ -368,19 +364,39 @@ impl MainData {
             let mut corners: opencv::core::Vector<opencv::core::Vector<opencv::core::Point2f>> =
                 Default::default();
             let mut a: opencv::core::Vector<opencv::core::Point2f> = Default::default();
-            a.push(Default::default());
-            a.push(Default::default());
-            a.push(Default::default());
-            a.push(Default::default());
+            a.push(opencv::core::Point2f::new(1.0, 2.0));
+            a.push(opencv::core::Point2f::new(1.0, 2.0));
+            a.push(opencv::core::Point2f::new(1.0, 2.0));
+            a.push(opencv::core::Point2f::new(1.0, 2.0));
             let num_things = 81;
             for _ in 0..num_things {
                 corners.push(a.clone());
             }
             let mut ids: opencv::core::Vector<i32> = Default::default();
             for i in 0..num_things {
-                ids.push(i);
+                ids.push(1);
             }
-            let mut rejected: opencv::core::Vector<opencv::core::Point2f> = Default::default();
+            let mut rejected: opencv::core::Vector<opencv::core::Vector<opencv::core::Point2f>> =
+                Default::default();
+            let mut a: opencv::core::Vector<opencv::core::Point2f> = Default::default();
+            a.push(opencv::core::Point2f::new(1.0, 2.0));
+            a.push(opencv::core::Point2f::new(1.0, 2.0));
+            a.push(opencv::core::Point2f::new(1.0, 2.0));
+            a.push(opencv::core::Point2f::new(1.0, 2.0));
+            for _ in 0..num_things {
+                rejected.push(a.clone());
+            }
+            if debug.is_some() {
+                for r in &rejected {
+                    println!("Rejected point {:?}", r);
+                }
+                for r in &corners {
+                    println!("Accepted corner: {:?}", r);
+                }
+                for i in &ids {
+                    println!("ID {}", i)
+                }
+            }
             let a = opencv::aruco::detect_markers(
                 img,
                 &d,
@@ -389,20 +405,14 @@ impl MainData {
                 &opencv::aruco::DetectorParameters::create().unwrap(),
                 &mut rejected,
             );
-            for r in rejected {
-                println!("Rejected point {:?}", r);
-            }
-            for r in &corners {
-                println!("Accepted corner: {:?}", r);
+            if debug.is_some() {
+                println!("Detect markers: {:?} {} {}", a, corners.len(), ids.len());
             }
             if a.is_ok() {
-                let mut charuco_corners: opencv::core::Vector<
-                    opencv::core::Vector<opencv::core::Point2f>,
-                > = Default::default();
-                let mut charuco_ids: opencv::core::Vector<i32> = Default::default();
-                for i in 0..num_things {
-                    charuco_ids.push(i);
-                }
+                let mut charuco_corners: opencv::core::Mat = Default::default();
+                let mut charuco_ids: opencv::core::Mat = Default::default();
+                let mut vimgs: opencv::core::Vector<opencv::core::Mat> = opencv::core::Vector::new();
+                vimgs.push(img.to_owned());
                 let b = opencv::aruco::interpolate_corners_charuco_def(
                     &corners,
                     &ids,
@@ -411,25 +421,23 @@ impl MainData {
                     &mut charuco_corners,
                     &mut charuco_ids,
                 );
-                if let Some(debug) = debug {
-                    println!(
-                        "Charuco check got {} {}",
-                        charuco_corners.len(),
-                        charuco_ids.len()
-                    );
-                    println!(
-                        "Charuco corners {} {}\n\t{:?}",
-                        charuco_corners.len(),
-                        charuco_corners.get(0).unwrap().len(),
-                        charuco_corners
-                    );
-                    let test = opencv::aruco::draw_detected_corners_charuco(
-                        debug,
-                        &charuco_corners,
-                        &opencv::core::no_array(),
-                        opencv::core::VecN([255.0, 0.0, 0.0, 0.0]),
-                    );
-                    println!("Test is {:?}", test);
+                if debug.is_some() {
+                    println!("interpolate is {:?}", b);
+                }
+                if b.is_ok() {
+                    if let Some(debug) = debug {
+                        let test = opencv::aruco::draw_detected_corners_charuco(
+                            debug,
+                            &charuco_corners,
+                            &opencv::core::no_array(),
+                            opencv::core::VecN([255.0, 0.0, 0.0, 255.0]),
+                        );
+                        println!("Test is {:?}", test);
+                        println!("Charuco corners channels {}", debug.channels());
+                        let asdf = opencv::imgcodecs::imwrite("./charuco_corners.png", debug, &opencv::core::Vector::new());
+                        println!("Result of saving charuco corners {:?}", asdf);
+                        
+                    }
                 }
                 if let Ok(b) = b { b } else { 0 }
             } else {
@@ -570,20 +578,22 @@ impl eframe::App for MainData {
                 if let Some(i) = &self.selected_camera {
                     if let Some(img) = self.image_set.get(i) {
                         if let Ok(data) = img.data_bytes() {
-                            let charuco = self.check_charuco_image(img.as_ref(), None);
-                            ui.label(format!("Current image charuco count is {}", charuco));
-                            if use_newest_image {
-                                self.charuco_images.push(*img.clone());
+                            if true {
+                                let charuco = self.check_charuco_image(img.as_ref(), None);
+                                ui.label(format!("Current image charuco count is {}", charuco));
+                                if use_newest_image {
+                                    self.charuco_images.push(*img.clone());
+                                }
+                                let dims = [img.cols() as usize, img.rows() as usize];
+                                let cimg = eframe::egui::ColorImage::from_rgb(dims, data);
+                                let a = ctx.load_texture(
+                                    "actual_image",
+                                    cimg.clone(),
+                                    eframe::egui::TextureOptions::LINEAR,
+                                );
+                                self.actual_image.replace(cimg);
+                                self.img.replace(a);
                             }
-                            let dims = [img.cols() as usize, img.rows() as usize];
-                            let cimg = eframe::egui::ColorImage::from_rgb(dims, data);
-                            let a = ctx.load_texture(
-                                "actual_image",
-                                cimg.clone(),
-                                eframe::egui::TextureOptions::LINEAR,
-                            );
-                            self.actual_image.replace(cimg);
-                            self.img.replace(a);
                         }
                     }
                 }
