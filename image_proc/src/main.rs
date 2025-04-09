@@ -5,14 +5,14 @@ use std::{
     time::Duration,
 };
 
-use eframe::{CreationContext, egui::Color32};
+use eframe::{egui::{Color32, ColorImage}, CreationContext};
 use egui_plot::{Line, Plot, PlotPoints};
 use opencv::{
-    core::{MatTraitConst, MatTraitConstManual},
+    core::{MatTrait, MatTraitConst, MatTraitConstManual, MatTraitManual},
     videoio::VideoCaptureTrait,
 };
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct SaveableOpencvMat {
     width: i32,
     height: i32,
@@ -23,30 +23,75 @@ struct SaveableOpencvMat {
 impl From<opencv::core::Mat> for SaveableOpencvMat {
     fn from(value: opencv::core::Mat) -> Self {
         let s = value.size().unwrap();
-        Self {
+        let t = Self {
             width: s.width,
             height: s.height,
             typ: value.typ(), 
             data: value.data_bytes().unwrap().to_vec(),
-        }
+        };
+        t
+    }
+}
+
+impl opencv::core::MatTraitConst for SaveableOpencvMat {
+    fn as_raw_Mat(&self) -> *const opencv::mod_prelude_sys::c_void {
+        self.data.as_ptr() as *const opencv::mod_prelude_sys::c_void
     }
 }
 
 impl Into<opencv::core::Mat> for SaveableOpencvMat {
     fn into(self) -> opencv::core::Mat {
+        let mut m = opencv::core::Mat::default();
         let mut size = opencv::core::Size::default();
         size.width = self.width;
         size.height = self.height;
-        let mut m = unsafe { opencv::core::Mat::new_size(size, self.typ) }.unwrap();
-        let orig = opencv::core::Mat::new_size_with_data(size, &self.data).unwrap();
-        let _ = orig.copy_to(&mut m);
+        let mut orig = opencv::core::Mat::new_size_with_default(size, opencv::core::CV_64FC1, Default::default()).unwrap();
+        let p = orig.data_bytes_mut().unwrap();
+        p.copy_from_slice(&self.data);
+        let a = orig.copy_to(&mut m);
+        println!("Copy image result is {:?}", a);
         m
     }
 }
 
+#[enum_dispatch::enum_dispatch]
+trait CalibrationDataTrait {
+    fn apply_calibration(&self, img: ColorImage) -> ColorImage;
+}
+
+#[enum_dispatch::enum_dispatch(CalibrationDataTrait)]
 #[derive(serde::Serialize, serde::Deserialize)]
 enum CalibrationData {
     OpenCvCharuco([SaveableOpencvMat; 2]),
+}
+
+impl CalibrationDataTrait for [SaveableOpencvMat; 2] {
+    fn apply_calibration(&self, img: ColorImage) -> ColorImage {
+        println!("colorimg is {:?}", img);
+        let mut m = opencv::core::Mat::default();
+        let mut size = opencv::core::Size::default();
+        size.width = img.width() as i32;
+        size.height = img.height() as i32;
+        println!("Size2 is {:?}", size);
+        let mut orig = opencv::core::Mat::new_size_with_default(size, opencv::core::CV_8UC3, Default::default()).unwrap();
+        let p = orig.data_bytes_mut().unwrap();
+        let cdata = &img.pixels;
+        let rdata: Vec<u8> = cdata.iter().map(|a| [a.b(), a.g(), a.r()]).flatten().collect();
+        p.copy_from_slice(&rdata);
+        let _ = orig.copy_to(&mut m);
+        let mat = m;
+        let mut oimg: opencv::core::Mat = Default::default();
+        let cm: opencv::core::Mat = self[0].clone().into();
+        let dc: opencv::core::Mat = self[1].clone().into();
+        println!("CM: {:?}", cm);
+        println!("DC: {:?}", dc);
+        let a = opencv::calib3d::undistort(&mat, &mut oimg, &cm, &dc, &opencv::core::no_array());
+        println!("Applied calibration {:?}", a);
+        let data = oimg.data_bytes().unwrap();
+        let dims = [oimg.cols() as usize, oimg.rows() as usize];
+        let cimg = eframe::egui::ColorImage::from_rgb(dims, data);
+        cimg
+    }
 }
 
 #[derive(Debug)]
@@ -315,6 +360,9 @@ impl MainData {
 
     fn calibrate_camera(&mut self, i: i32) -> Result<(), ()> {
         let d = get_charuco_dictionary().ok_or(())?;
+        if self.charuco_images.is_empty() {
+            return Err(());
+        }
         let mut camera_matrix: opencv::core::Mat = Default::default();
         let mut dist_coeffs: opencv::core::Mat = Default::default();
         let mut all_corners: opencv::core::Vector<opencv::core::Vector<opencv::core::Point2f>> =
@@ -325,6 +373,7 @@ impl MainData {
             Default::default();
         let mut all_ids_a: opencv::core::Vector<i32> =
             Default::default();
+        println!("Calibrating with {} images", self.charuco_images.len());
         for img in &self.charuco_images {
             let mut corners: opencv::core::Vector<opencv::core::Vector<opencv::core::Point2f>> =
                 Default::default();
@@ -640,13 +689,24 @@ impl eframe::App for MainData {
                 ));
                 if let Some(i) = &self.selected_camera {
                     if let Some(img) = self.image_set.get(i) {
-                        if let Ok(data) = img.data_bytes() {
-                            if true {
-                                //let charuco = self.check_charuco_image(img.as_ref(), None);
-                                //ui.label(format!("Current image charuco count is {}", charuco));
-                                if use_newest_image {
-                                    self.charuco_images.push(*img.clone());
-                                }
+                        if use_newest_image {
+                            self.charuco_images.push(*img.clone());
+                        }
+                        if let Some(cd) = &self.cd {
+                            if let Ok(data) = img.data_bytes() {
+                                let dims = [img.cols() as usize, img.rows() as usize];
+                                let egui_img = eframe::egui::ColorImage::from_rgb(dims, data);
+                                let cimg = cd.apply_calibration(egui_img);
+                                let a = ctx.load_texture(
+                                    "actual_image",
+                                    cimg.clone(),
+                                    eframe::egui::TextureOptions::LINEAR,
+                                );
+                                self.actual_image.replace(cimg);
+                                self.img.replace(a);
+                            }
+                        } else {
+                            if let Ok(data) = img.data_bytes() {
                                 let dims = [img.cols() as usize, img.rows() as usize];
                                 let cimg = eframe::egui::ColorImage::from_rgb(dims, data);
                                 let a = ctx.load_texture(
