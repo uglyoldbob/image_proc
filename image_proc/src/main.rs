@@ -5,10 +5,13 @@ use std::{
     time::Duration,
 };
 
-use eframe::{egui::{Color32, ColorImage}, CreationContext};
+use eframe::{
+    CreationContext,
+    egui::ColorImage,
+};
 use egui_plot::{Line, Plot, PlotPoints};
 use opencv::{
-    core::{MatTrait, MatTraitConst, MatTraitConstManual, MatTraitManual},
+    core::{MatTraitConst, MatTraitConstManual, MatTraitManual},
     videoio::VideoCaptureTrait,
 };
 
@@ -26,7 +29,7 @@ impl From<opencv::core::Mat> for SaveableOpencvMat {
         let t = Self {
             width: s.width,
             height: s.height,
-            typ: value.typ(), 
+            typ: value.typ(),
             data: value.data_bytes().unwrap().to_vec(),
         };
         t
@@ -45,7 +48,12 @@ impl Into<opencv::core::Mat> for SaveableOpencvMat {
         let mut size = opencv::core::Size::default();
         size.width = self.width;
         size.height = self.height;
-        let mut orig = opencv::core::Mat::new_size_with_default(size, opencv::core::CV_64FC1, Default::default()).unwrap();
+        let mut orig = opencv::core::Mat::new_size_with_default(
+            size,
+            opencv::core::CV_64FC1,
+            Default::default(),
+        )
+        .unwrap();
         let p = orig.data_bytes_mut().unwrap();
         p.copy_from_slice(&self.data);
         let a = orig.copy_to(&mut m);
@@ -73,10 +81,19 @@ impl CalibrationDataTrait for [SaveableOpencvMat; 2] {
         size.width = img.width() as i32;
         size.height = img.height() as i32;
         println!("Size2 is {:?}", size);
-        let mut orig = opencv::core::Mat::new_size_with_default(size, opencv::core::CV_8UC3, Default::default()).unwrap();
+        let mut orig = opencv::core::Mat::new_size_with_default(
+            size,
+            opencv::core::CV_8UC3,
+            Default::default(),
+        )
+        .unwrap();
         let p = orig.data_bytes_mut().unwrap();
         let cdata = &img.pixels;
-        let rdata: Vec<u8> = cdata.iter().map(|a| [a.b(), a.g(), a.r()]).flatten().collect();
+        let rdata: Vec<u8> = cdata
+            .iter()
+            .map(|a| [a.b(), a.g(), a.r()])
+            .flatten()
+            .collect();
         p.copy_from_slice(&rdata);
         let _ = orig.copy_to(&mut m);
         let mat = m;
@@ -224,16 +241,12 @@ struct MainData {
     selected_camera: Option<i32>,
     charuco_images: Vec<opencv::core::Mat>,
     charuco_board: opencv::core::Ptr<opencv::aruco::CharucoBoard>,
-    image_thread: JoinHandle<()>,
+    _image_thread: JoinHandle<()>,
     image_set: BTreeMap<i32, Box<opencv::core::Mat>>,
     to_image_thread: crossbeam::channel::Sender<ToCameraThread>,
     from_image_thread: crossbeam::channel::Receiver<FromCameraThread>,
     cd: Option<CalibrationData>,
-}
-
-enum InterpolationMethod {
-    Nearest,
-    Linear,
+    apply_cd: bool,
 }
 
 impl MainData {
@@ -251,71 +264,12 @@ impl MainData {
             selected_camera: None,
             charuco_images: Vec::new(),
             charuco_board: cboard,
-            image_thread: t,
+            _image_thread: t,
             image_set: BTreeMap::new(),
             to_image_thread: to_thread.0,
             from_image_thread: from_thread.1,
             cd: None,
-        }
-    }
-
-    fn correct_image(
-        &mut self,
-        ctx: &eframe::egui::Context,
-        spline: splines::Spline<f64, f64>,
-        method: InterpolationMethod,
-    ) {
-        if let Some(i) = &self.actual_image {
-            let mut ic = i.clone();
-            let mut moved_pixels: Vec<(f64, f64, eframe::egui::Color32)> = Vec::new();
-            let center_x = ic.width() as f64 / 2.0;
-            let center_y = ic.height() as f64 / 2.0;
-            let corner_distance = ((center_x * center_x) + (center_y * center_y)).sqrt();
-            for x in 0..ic.width() {
-                for y in 0..ic.height() {
-                    let dx = (x as f64) - center_x;
-                    let dy = (y as f64) - center_y;
-                    let dist = ((dx * dx) + (dy * dy)).sqrt() / corner_distance;
-                    let correction = 1.0 + spline.clamped_sample(dist).unwrap();
-                    let newdx = dx * correction;
-                    let newdy = dy * correction;
-                    let newx = newdx + center_x;
-                    let newy = newdy + center_y;
-                    moved_pixels.push((newx, newy, ic.pixels[y * ic.width() + x]));
-                }
-            }
-            let width = ic.width();
-            for i in &mut ic.pixels {
-                *i = Color32::BLACK;
-            }
-            match method {
-                InterpolationMethod::Linear => todo!(),
-                InterpolationMethod::Nearest => {
-                    let mut pmap: Vec<Option<Color32>> = vec![None; ic.width() * ic.height()];
-                    for (x, y, p) in moved_pixels {
-                        let nx = x.round();
-                        let ny = y.round();
-                        if nx >= 0.0
-                            && ny >= 0.0
-                            && nx < ic.width() as f64
-                            && ny < ic.height() as f64
-                        {
-                            let nx = nx as usize;
-                            let ny = ny as usize;
-                            pmap[ny * width + nx] = Some(p);
-                        }
-                    }
-                    for (i, p) in pmap.iter().enumerate() {
-                        if let Some(p) = *p {
-                            ic.pixels[i] = p;
-                        } else {
-                            ic.pixels[i] = Color32::MAGENTA;
-                        }
-                    }
-                }
-            }
-            let a = ctx.load_texture("corrected_image", ic, eframe::egui::TextureOptions::LINEAR);
-            self.corrected_img.replace(a);
+            apply_cd: true,
         }
     }
 
@@ -339,7 +293,7 @@ impl MainData {
 
     fn make_charuco_mat(&mut self) -> opencv::core::Mat {
         let mut pic = opencv::core::Mat::default();
-        let a = opencv::aruco::CharucoBoardTrait::draw(
+        opencv::aruco::CharucoBoardTrait::draw(
             &mut self.charuco_board,
             opencv::core::Size {
                 width: 2400,
@@ -348,17 +302,18 @@ impl MainData {
             &mut pic,
             10,
             1,
-        );
+        )
+        .unwrap();
         pic
     }
 
     fn save_charuco_image(&mut self) {
         println!("Saving charuco board");
-        let pic = self. make_charuco_mat();
+        let pic = self.make_charuco_mat();
         let _ = opencv::imgcodecs::imwrite("./charuco.png", &pic, &opencv::core::Vector::new());
     }
 
-    fn calibrate_camera(&mut self, i: i32) -> Result<(), ()> {
+    fn calibrate_camera(&mut self, _i: i32) -> Result<(), ()> {
         let d = get_charuco_dictionary().ok_or(())?;
         if self.charuco_images.is_empty() {
             return Err(());
@@ -366,13 +321,10 @@ impl MainData {
         let mut camera_matrix: opencv::core::Mat = Default::default();
         let mut dist_coeffs: opencv::core::Mat = Default::default();
         let mut all_corners: opencv::core::Vector<opencv::core::Vector<opencv::core::Point2f>> =
-                Default::default();
-        let mut all_corners_a: opencv::core::Vector<opencv::core::Point2f> =
-                Default::default();
-        let mut all_ids: opencv::core::Vector<opencv::core::Vector<i32>> =
             Default::default();
-        let mut all_ids_a: opencv::core::Vector<i32> =
-            Default::default();
+        let mut all_corners_a: opencv::core::Vector<opencv::core::Point2f> = Default::default();
+        let mut all_ids: opencv::core::Vector<opencv::core::Vector<i32>> = Default::default();
+        let mut all_ids_a: opencv::core::Vector<i32> = Default::default();
         println!("Calibrating with {} images", self.charuco_images.len());
         for img in &self.charuco_images {
             let mut corners: opencv::core::Vector<opencv::core::Vector<opencv::core::Point2f>> =
@@ -409,20 +361,24 @@ impl MainData {
                     &self.charuco_board,
                     &mut charuco_corners,
                     &mut charuco_ids,
-                ).map_err(|_|())?;
+                )
+                .map_err(|_| ())?;
                 println!("Interpolate retured {}", b);
                 println!(
                     "charuco: There are {} corners, {} ids",
                     charuco_corners.rows(),
                     charuco_ids.rows()
                 );
-                println!("Charuco corner element size {:?}", charuco_corners.elem_size());
-                let cc : Vec<Vec<opencv::core::Point2f>> = charuco_corners.to_vec_2d().unwrap();
+                println!(
+                    "Charuco corner element size {:?}",
+                    charuco_corners.elem_size()
+                );
+                let cc: Vec<Vec<opencv::core::Point2f>> = charuco_corners.to_vec_2d().unwrap();
                 for i in cc {
                     println!("charuco corner: {:?}", i);
                     all_corners_a.push(i[0]);
                 }
-                let cc : Vec<Vec<i32>> = charuco_ids.to_vec_2d().unwrap();
+                let cc: Vec<Vec<i32>> = charuco_ids.to_vec_2d().unwrap();
                 for i in cc {
                     println!("charuco id: {:?}", i);
                     all_ids_a.push(i[0]);
@@ -454,7 +410,10 @@ impl MainData {
             0,
             criteria,
         );
-        println!("Calibrate returned {:?} {:?} {:?}", c, camera_matrix, dist_coeffs);
+        println!(
+            "Calibrate returned {:?} {:?} {:?}",
+            c, camera_matrix, dist_coeffs
+        );
         let cm: SaveableOpencvMat = camera_matrix.into();
         let dc: SaveableOpencvMat = dist_coeffs.into();
         let cd = CalibrationData::OpenCvCharuco([cm, dc]);
@@ -485,7 +444,7 @@ impl MainData {
                 corners.push(a.clone());
             }
             let mut ids: opencv::core::Vector<i32> = Default::default();
-            for i in 0..num_things {
+            for _ in 0..num_things {
                 ids.push(1);
             }
             let mut rejected: opencv::core::Vector<opencv::core::Vector<opencv::core::Point2f>> =
@@ -523,7 +482,8 @@ impl MainData {
             if a.is_ok() {
                 let mut charuco_corners: opencv::core::Mat = Default::default();
                 let mut charuco_ids: opencv::core::Mat = Default::default();
-                let mut vimgs: opencv::core::Vector<opencv::core::Mat> = opencv::core::Vector::new();
+                let mut vimgs: opencv::core::Vector<opencv::core::Mat> =
+                    opencv::core::Vector::new();
                 vimgs.push(img.to_owned());
                 let b = opencv::aruco::interpolate_corners_charuco_def(
                     &corners,
@@ -546,9 +506,12 @@ impl MainData {
                         );
                         println!("Test is {:?}", test);
                         println!("Charuco corners channels {}", debug.channels());
-                        let asdf = opencv::imgcodecs::imwrite("./charuco_corners.png", debug, &opencv::core::Vector::new());
+                        let asdf = opencv::imgcodecs::imwrite(
+                            "./charuco_corners.png",
+                            debug,
+                            &opencv::core::Vector::new(),
+                        );
                         println!("Result of saving charuco corners {:?}", asdf);
-                        
                     }
                 }
                 if let Ok(b) = b { b } else { 0 }
@@ -663,7 +626,7 @@ impl eframe::App for MainData {
                     }
                     if ui.button("Do calibration").clicked() {
                         if let Some(i) = self.selected_camera {
-                            self.calibrate_camera(i);
+                            let _ = self.calibrate_camera(i);
                         }
                     }
                 });
@@ -683,6 +646,7 @@ impl eframe::App for MainData {
                     self.actual_image.replace(cimg);
                     self.img.replace(a);
                 }
+                ui.checkbox(&mut self.apply_cd, "Apply calibration");
                 ui.label(format!(
                     "There are {} saved charuco images",
                     self.charuco_images.len()
@@ -799,7 +763,6 @@ impl eframe::App for MainData {
                             let newpos = ptr + p.response.drag_delta();
                             let newpos2 = p.transform.value_from_position(newpos);
                             self.scale[b as usize] = newpos2.y as f64;
-                            self.correct_image(ctx, spline, InterpolationMethod::Nearest);
                         }
                     }
                 }
